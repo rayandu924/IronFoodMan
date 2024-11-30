@@ -1,0 +1,870 @@
+<!DOCTYPE html>
+<html lang="fr">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <link type="text/css" rel="stylesheet" href="main.css">
+</head>
+
+<body>
+    <div id="info">
+        <div id="infoContent">
+            <h2>IronFoodMan</h2>
+            <p>Vous incarnez IronFoodMan, le cousin éloigné d'IronMan, qui a pour mission de détruire toute la malbouffe. Utilisez votre laser pour cibler les objets et les éliminer avant la fin du temps imparti.</p>
+            <button id="startButton">Commencer la Partie</button>
+        </div>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+        
+        const AUTO_DELETE_DURATION = 0.9;
+        const GRAVITY = 0; 
+        const SPAWN_HEIGHT = 5;
+        const GROUND_LEVEL = -5;
+        const MAX_OBJECTS = 30;
+        const GAME_DURATION = 60; 
+
+        
+        const goodModels = ['apple', 'pineapple', 'banana', 'strawberries', 'tomato'];
+        const badModels = ['egg', 'chicken', 'burger', 'hotdog', 'chips', 'pizza', 'donut', 'icecream', 'chocolate', 'cupcake', 'soda'];
+
+        
+        let remainingTime = GAME_DURATION;
+        let score = 0;
+        let gameActive = false; 
+
+        
+        const infoElement = document.getElementById('info');
+        const infoContent = document.getElementById('infoContent');
+        const startButton = document.getElementById('startButton');
+
+        
+        let container, camera, scene, renderer;
+        let controls, group;
+        let raycaster;
+        let laserBeam;
+        let intersected = [];
+        let previousTime = null;
+
+        
+        let listener;
+        let hitSound, explosionSound;
+
+        
+        let destructionParticles = [];
+        let sparkParticles = [];
+
+        
+        const loader = new GLTFLoader();
+        const models = [];
+
+        
+        let timerSprite, scoreSprite;
+
+        
+        let isHittingObject = false;
+
+        
+        function createLabelTexture(text) {
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            const fontSize = 32; 
+            context.font = `${fontSize}px Arial`;
+            const textWidth = context.measureText(text).width;
+            canvas.width = Math.max(textWidth + 20, 64); 
+            canvas.height = fontSize * 1.2 + 20; 
+
+            
+            context.font = `${fontSize}px Arial`;
+            context.fillStyle = 'rgba(255, 255, 255, 1)';
+            context.fillText(text, 10, fontSize + 10); 
+
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.minFilter = THREE.LinearFilter; 
+            return texture;
+        }
+
+        
+        function createTextSprite(message, parameters = {}) {
+            const fontface = parameters.hasOwnProperty("fontface") ? parameters["fontface"] : "Arial";
+            const fontsize = parameters.hasOwnProperty("fontsize") ? parameters["fontsize"] : 24;
+            const borderThickness = parameters.hasOwnProperty("borderThickness") ? parameters["borderThickness"] : 4;
+            const borderColor = parameters.hasOwnProperty("borderColor") ? parameters["borderColor"] : { r: 0, g: 0, b: 0, a: 1.0 };
+            const backgroundColor = parameters.hasOwnProperty("backgroundColor") ? parameters["backgroundColor"] : { r: 255, g: 255, b: 255, a: 0.0 }; 
+
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            context.font = `${fontsize}px ${fontface}`;
+
+            
+            const metrics = context.measureText(message);
+            const textWidth = metrics.width;
+
+            
+            canvas.width = Math.max(textWidth + borderThickness * 2, 64); 
+            canvas.height = fontsize * 1.4 + borderThickness * 2; 
+
+            
+            if (backgroundColor.a > 0) { 
+                context.fillStyle = `rgba(${backgroundColor.r},${backgroundColor.g},${backgroundColor.b},${backgroundColor.a})`;
+                context.fillRect(borderThickness, borderThickness, canvas.width - borderThickness * 2, canvas.height - borderThickness * 2);
+            }
+
+            
+            context.font = `${fontsize}px ${fontface}`;
+            context.fillStyle = "rgba(255, 255, 255, 1)"; 
+            context.fillText(message, borderThickness, fontsize + borderThickness);
+
+            
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.needsUpdate = true;
+
+            
+            const spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
+            const sprite = new THREE.Sprite(spriteMaterial);
+            sprite.scale.set(0.3, 0.15, 1); 
+
+            return sprite;
+        }
+
+        
+        class GameObject {
+            constructor(model, isGood) {
+                this.model = model.clone();
+                this.isGood = isGood; 
+                this.health = 100;
+                this.currentHealth = 100;
+                this.isDeleting = false;
+                this.autoDeleteTimer = null;
+                this.canBeHit = true;
+
+                this.barWidth = 0.25; 
+
+                this.setupModel();
+                this.createHealthBar();
+                this.createLabel();
+                group.add(this.model);
+            }
+
+            setupModel() {
+                this.model.traverse(child => {
+                    if (child.isMesh) {
+                        child.castShadow = true;
+                        child.receiveShadow = true;
+                    }
+                });
+
+                
+                const spawnRadius = 3.5; 
+                const angle = Math.random() * 2 * Math.PI;
+                const distance = Math.random() * spawnRadius + 3; 
+
+                this.model.position.set(
+                    Math.cos(angle) * distance,
+                    Math.random() * (SPAWN_HEIGHT - 1) + 1,
+                    Math.sin(angle) * distance
+                );
+
+                this.model.scale.setScalar(2);
+                this.model.userData.gameObject = this;
+            }
+
+            createHealthBar() {
+                const barHeight = 0.05;
+                const geometry = new THREE.PlaneGeometry(this.barWidth, barHeight);
+
+                
+                this.healthBarGroup = new THREE.Group();
+                this.healthBarGroup.position.set(0, 0.4, 0);
+                this.model.add(this.healthBarGroup);
+
+                
+                const bgMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000, side: THREE.DoubleSide });
+                this.healthBarBg = new THREE.Mesh(geometry, bgMaterial);
+                this.healthBarBg.name = 'healthBarBg';
+                this.healthBarBg.userData.ignoreRaycast = true;
+                this.healthBarGroup.add(this.healthBarBg);
+
+                
+                const fgMaterial = new THREE.MeshBasicMaterial({ color: 0x00ff00, side: THREE.DoubleSide });
+                this.healthBarFg = new THREE.Mesh(geometry, fgMaterial);
+                this.healthBarFg.name = 'healthBarFg';
+                this.healthBarFg.position.x = -this.barWidth / 2; 
+                this.healthBarFg.scale.x = 1;
+                this.healthBarFg.userData.ignoreRaycast = true;
+                this.healthBarGroup.add(this.healthBarFg);
+            }
+
+            createLabel() {
+                const modelName = this.model.name || 'Objet'; 
+                const sprite = createTextSprite(modelName, { backgroundColor: { r: 255, g: 255, b: 255, a: 0.0 } }); 
+                sprite.scale.set(0.4, 0.25, 0); 
+                sprite.position.set(0, 0.55, 0); 
+                sprite.userData.ignoreRaycast = true; 
+
+                this.model.add(sprite);
+                this.label = sprite;
+            }
+
+            updateHealthBar(delta) {
+                
+                const healthSpeed = 100;
+                if (this.currentHealth > this.health) {
+                    this.currentHealth -= healthSpeed * delta;
+                    if (this.currentHealth < this.health) this.currentHealth = this.health;
+                }
+
+                
+                const healthRatio = this.currentHealth / 100;
+                this.healthBarFg.scale.x = healthRatio;
+                this.healthBarFg.position.x = - (this.barWidth * (1 - healthRatio)) / 2; 
+            }
+
+            update(delta) {
+                this.updateHealthBar(delta);
+                this.applyGravity(delta);
+                this.checkGroundCollision();
+
+                
+                if (camera) {
+                    this.healthBarGroup.lookAt(camera.position);
+                }
+            }
+
+            applyGravity(delta) {
+                this.model.position.y += GRAVITY * delta;
+            }
+
+            checkGroundCollision() {
+                if (this.model.position.y <= GROUND_LEVEL) {
+                    this.remove();
+                }
+            }
+
+            handleIntersections() {
+                if (!this.canBeHit) return; 
+
+                
+                this.health -= 10;
+                if (this.health < 0) this.health = 0; 
+
+                
+                this.vibrateDevice();
+
+                
+                this.canBeHit = false;
+                setTimeout(() => {
+                    this.canBeHit = true;
+                }, 50); 
+
+                
+                if (this.health <= 0 && !this.isDeleting) {
+                    this.isDeleting = true;
+                    this.autoDeleteTimer = setTimeout(() => {
+                        this.remove();
+                    }, AUTO_DELETE_DURATION * 1000);
+                }
+            }
+
+            vibrateDevice() {
+                if (navigator.vibrate) {
+                    navigator.vibrate(100); 
+                }
+            }
+
+            remove() {
+                group.remove(this.model);
+
+                if (explosionSound) {
+                    explosionSound.play();
+                }
+
+                
+                if (!this.isGood) {
+                    score += 10;
+                    updateScore();
+                    createDestructionAnimation(this.model.position);
+                }
+
+                createObject(); 
+            }
+        }
+
+        
+        function loadModels() {
+            const modelPaths = [
+                'assets/models/apple.glb',
+                'assets/models/pineapple.glb',
+                'assets/models/banana.glb',
+                'assets/models/strawberries.glb',
+                'assets/models/tomato.glb',
+                'assets/models/water.glb',
+                'assets/models/egg.glb',
+                'assets/models/chicken.glb',
+                'assets/models/burger.glb',
+                'assets/models/hotdog.glb',
+                'assets/models/chips.glb',
+                'assets/models/pizza.glb',
+                'assets/models/donut.glb',
+                'assets/models/icecream.glb',
+                'assets/models/chocolate.glb',
+                'assets/models/cupcake.glb',
+                'assets/models/soda.glb'
+            ];
+
+            let loadedModels = 0;
+
+            function checkIfAllModelsLoaded() {
+                loadedModels++;
+                if (loadedModels === modelPaths.length) {
+                    createObjects();
+                }
+            }
+
+            modelPaths.forEach(path => {
+                loader.load(path, gltf => {
+                    const modelName = path.split('/').pop().replace('.glb', ''); 
+                    gltf.scene.name = modelName;
+                    models.push(gltf.scene);
+                    checkIfAllModelsLoaded();
+                }, undefined, error => {
+                    console.error('Erreur lors du chargement du modèle :', error);
+                    checkIfAllModelsLoaded();
+                });
+            });
+        }
+
+        
+        function init() {
+            setupContainer();
+            setupScene();
+            setupCamera();
+            setupControls();
+            setupLighting();
+            setupGroup();
+            setupRenderer();
+            window.addEventListener('resize', onWindowResize);
+            setupRaycaster();
+            createLaserBeam();
+
+            
+            timerSprite = createTextSprite(`Timer : ${Math.ceil(remainingTime)}`, { fontsize: 64, backgroundColor: { r: 255, g: 255, b: 255, a: 0.0 } });
+            timerSprite.position.set(0.3, -1, -2); 
+            camera.add(timerSprite);
+
+            scoreSprite = createTextSprite(`Score : ${score}`, { fontsize: 64, backgroundColor: { r: 255, g: 255, b: 255, a: 0.0 } });
+            scoreSprite.position.set(-0.3, -1, -2); 
+            camera.add(scoreSprite);
+
+            
+            startButton.addEventListener('click', startGame);
+        }
+
+        
+        function setupContainer() {
+            container = document.createElement('div');
+            document.body.appendChild(container);
+        }
+
+        
+        function setupScene() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x808080);
+        }
+
+        
+        function setupCamera() {
+            camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 1.6, 3);
+        }
+
+        
+        function setupControls() {
+            controls = new OrbitControls(camera, container);
+            controls.target.set(0, 1.6, 0);
+            controls.update();
+        }
+
+        
+        function setupLighting() {
+            const hemiLight = new THREE.HemisphereLight(0xbcbcbc, 0xa5a5a5, 3);
+            scene.add(hemiLight);
+
+            const dirLight = new THREE.DirectionalLight(0xffffff, 3);
+            dirLight.position.set(0, 6, 0);
+            dirLight.castShadow = true;
+            dirLight.shadow.camera.top = 3;
+            dirLight.shadow.camera.bottom = -3;
+            dirLight.shadow.camera.right = 3;
+            dirLight.shadow.camera.left = -3;
+            dirLight.shadow.mapSize.set(4096, 4096);
+            scene.add(dirLight);
+        }
+
+        
+        function setupGroup() {
+            group = new THREE.Group();
+            scene.add(group);
+        }
+
+        
+        function createObject() {
+            if (!gameActive) return; 
+
+            if (group.children.length >= MAX_OBJECTS) return;
+
+            if (models.length === 0) return;
+
+            const model = models[Math.floor(Math.random() * models.length)];
+            let isGood = goodModels.includes(model.name.toLowerCase());
+            let isBad = badModels.includes(model.name.toLowerCase());
+
+            if (!isGood && !isBad) {
+                
+                const random = Math.random();
+                if (random < 0.5) {
+                    isGood = true;
+                } else {
+                    isBad = true;
+                }
+            }
+
+            new GameObject(model, isGood);
+        }
+
+        
+        function createObjects() {
+            for (let i = 0; i < MAX_OBJECTS; i++) {
+                createObject();
+            }
+        }
+
+        
+        function setupRenderer() {
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setAnimationLoop(animate);
+            renderer.shadowMap.enabled = true;
+            renderer.xr.enabled = true;
+            container.appendChild(renderer.domElement);
+        }
+
+        
+        function setupAudio() {
+            listener = new THREE.AudioListener();
+            camera.add(listener);
+
+            const audioLoader = new THREE.AudioLoader();
+
+            
+            hitSound = new THREE.Audio(listener);
+            audioLoader.load('assets/sounds/laser.mp3', function(buffer) {
+                hitSound.setBuffer(buffer);
+                hitSound.setLoop(true); 
+                hitSound.setVolume(0.5);
+            }, undefined, function (err) {
+                console.error('Erreur lors du chargement du son de hit:', err);
+            });
+
+            
+            explosionSound = new THREE.Audio(listener);
+            audioLoader.load('assets/sounds/explosion.mp3', function(buffer) {
+                explosionSound.setBuffer(buffer);
+                explosionSound.setLoop(false);
+                explosionSound.setVolume(1.0);
+            }, undefined, function (err) {
+                console.error('Erreur lors du chargement du son explosion:', err);
+            });
+        }
+
+        
+        function createLaserBeam() {
+            const laserLength = 3;
+            const laserDiameter = 0.02;
+            const laserGeometry = new THREE.CylinderGeometry(laserDiameter / 2, laserDiameter / 2, laserLength, 32);
+            const laserMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000, transparent: true, opacity: 1 });
+            laserBeam = new THREE.Mesh(laserGeometry, laserMaterial);
+            laserBeam.rotation.x = Math.PI / 2;
+            laserBeam.rotation.z = -0.02;
+            laserBeam.position.set(0.03, -0.01, -laserLength / 2);
+            camera.add(laserBeam);
+            scene.add(camera);
+        }
+
+        
+        function setupRaycaster() {
+            raycaster = new THREE.Raycaster();
+            raycaster.camera = camera;
+        }
+
+        
+        function onWindowResize() {
+            if (renderer.xr.isPresenting) {
+                
+                console.warn('Ne pas redimensionner le renderer pendant une session XR.');
+                return;
+            }
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        
+        function animate(time) {
+            if (!previousTime) previousTime = time;
+            const delta = (time - previousTime) / 1000;
+            previousTime = time;
+
+            if (gameActive) {
+                updateTimer(delta);
+                cleanIntersected();
+                updateRaycaster();
+                handleIntersections();
+
+                updateSparks(delta); 
+                updateDestructionParticles(delta);
+
+                group.children.forEach(object => {
+                    if (object.userData.gameObject) {
+                        object.userData.gameObject.update(delta);
+                    }
+                });
+
+                
+                if (isHittingObject) {
+                    if (hitSound && !hitSound.isPlaying) {
+                        hitSound.play();
+                    }
+                } else {
+                    if (hitSound && hitSound.isPlaying) {
+                        hitSound.stop();
+                    }
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        
+        function updateRaycaster() {
+            const origin = new THREE.Vector3();
+            origin.setFromMatrixPosition(camera.matrixWorld);
+
+            const direction = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+            raycaster.set(origin, direction);
+        }
+
+        
+        function handleIntersections() {
+            isHittingObject = false;
+
+            const intersects = raycaster.intersectObjects(group.children.map(obj => obj), true);
+
+            if (intersects.length > 0) {
+                
+                const validIntersects = intersects.filter(intersect => {
+                    let obj = intersect.object;
+                    
+                    while (obj) {
+                        if (obj.userData.ignoreRaycast) return false;
+                        obj = obj.parent;
+                    }
+                    return true;
+                });
+
+                if (validIntersects.length > 0) {
+                    isHittingObject = true;
+
+                    let intersect = validIntersects[0];
+                    const intersectionPoint = intersect.point.clone(); 
+
+                    
+                    createSpark(intersectionPoint);
+
+                    let model = intersect.object;
+
+                    while (model.parent && model.parent !== scene && !model.userData.gameObject) {
+                        model = model.parent;
+                    }
+
+                    const gameObject = model.userData.gameObject;
+
+                    intersected.push(model);
+
+                    model.traverse(child => {
+                        if (child.material && child.material.emissive) {
+                            child.material.emissive.setHex(0xff0000);
+                        }
+                    });
+
+                    if (gameObject) {
+                        gameObject.handleIntersections();
+                    }
+                }
+            }
+        }
+
+        
+        function cleanIntersected() {
+            while (intersected.length) {
+                const obj = intersected.pop();
+                obj.traverse(child => {
+                    if (child.material && child.material.emissive) {
+                        child.material.emissive.setHex(0x000000);
+                    }
+                });
+            }
+        }
+
+        
+        function createSpark(position) {
+            const sparkGeometry = new THREE.SphereGeometry(0.02, 8, 8);
+            const sparkMaterial = new THREE.MeshBasicMaterial({
+                color: 0xffff00, 
+                emissive: 0xffff00
+            });
+            const spark = new THREE.Mesh(sparkGeometry, sparkMaterial);
+            spark.position.copy(position);
+
+            
+            const direction = new THREE.Vector3(
+                (Math.random() - 0.5) * 2,
+                Math.random() * 2,
+                (Math.random() - 0.5) * 2
+            ).normalize();
+
+            
+            spark.userData.velocity = direction.multiplyScalar(2); 
+            spark.userData.lifetime = 1.0; 
+
+            scene.add(spark);
+            sparkParticles.push(spark);
+        }
+
+        
+        function updateSparks(delta) {
+            for (let i = sparkParticles.length - 1; i >= 0; i--) {
+                const spark = sparkParticles[i];
+                
+                spark.position.addScaledVector(spark.userData.velocity, delta);
+
+                
+                spark.scale.multiplyScalar(1 - delta);
+
+                
+                const remainingLife = spark.userData.lifetime / 1.0;
+                spark.material.color.setHSL(0.1 * remainingLife, 1, 0.5);
+
+                
+                spark.userData.lifetime -= delta;
+                if (spark.userData.lifetime <= 0) {
+                    scene.remove(spark);
+                    sparkParticles.splice(i, 1);
+                }
+            }
+        }
+
+        
+        function createDestructionAnimation(position) {
+            const numParticles = 5;
+            for (let i = 0; i < numParticles; i++) {
+                const sphereGeometry = new THREE.SphereGeometry(0.01, 16, 16); 
+                const sphereMaterial = new THREE.MeshBasicMaterial({ color: 0x00ff00, transparent: true });
+                const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial);
+
+                
+                const angle = Math.random() * Math.PI * 2;
+                const radius = 0.2 + Math.random() * 0.2;
+                sphere.position.set(
+                    position.x + Math.cos(angle) * radius,
+                    position.y + Math.random() * 0.5,
+                    position.z + Math.sin(angle) * radius
+                );
+
+                
+                const cameraWorldPosition = new THREE.Vector3();
+                camera.getWorldPosition(cameraWorldPosition);
+                const direction = new THREE.Vector3().subVectors(cameraWorldPosition, sphere.position).normalize();
+                sphere.userData.velocity = direction.multiplyScalar(2); 
+
+                scene.add(sphere);
+                destructionParticles.push(sphere);
+            }
+        }
+
+        
+        function updateDestructionParticles(delta) {
+            const cameraWorldPosition = new THREE.Vector3();
+            camera.getWorldPosition(cameraWorldPosition);
+
+            for (let i = destructionParticles.length - 1; i >= 0; i--) {
+                const particle = destructionParticles[i];
+                particle.position.addScaledVector(particle.userData.velocity, delta);
+
+                
+                const distance = particle.position.distanceTo(cameraWorldPosition);
+                if (distance < 0.2) { 
+                    scene.remove(particle);
+                    destructionParticles.splice(i, 1);
+                }
+            }
+        }
+
+        
+        function updateScore() {
+            if (scoreSprite.material.map) {
+                scoreSprite.material.map.dispose(); 
+            }
+            scoreSprite.material.map = createTextSprite(`Score : ${score}`, { fontsize: 64, backgroundColor: { r: 255, g: 255, b: 255, a: 0.0 } }).material.map;
+        }
+
+        
+        function updateTimer(delta) {
+            remainingTime -= delta;
+            if (remainingTime <= 0) {
+                remainingTime = 0;
+                endGame();
+            }
+            if (timerSprite.material.map) {
+                timerSprite.material.map.dispose(); 
+            }
+            timerSprite.material.map = createTextSprite(`Timer : ${Math.ceil(remainingTime)}`, { fontsize: 64, backgroundColor: { r: 255, g: 255, b: 255, a: 0.0 } }).material.map;
+        }
+
+        
+        function endGame() {
+            gameActive = false;
+            showInfo(`
+                <h2>Fin de la Partie</h2>
+                <p>Votre score : <span id="finalScore">${score}</span></p>
+                <button id="restartButton">Relancer une Partie</button>
+            `);
+
+            const restartButton = document.getElementById('restartButton');
+            restartButton.addEventListener('click', restartGame);
+
+            
+            const session = renderer.xr.getSession();
+            if (session) {
+                session.end();
+            }
+        }
+
+        
+        function startARSession() {
+            if (navigator.xr) {
+                navigator.xr.requestSession('immersive-ar', {
+                    requiredFeatures: ['local-floor'],
+                    optionalFeatures: ['hand-tracking']
+                }).then(session => {
+                    renderer.xr.setSession(session);
+                    gameActive = true;
+                    remainingTime = GAME_DURATION;
+                    score = 0;
+                    updateScore();
+                    updateTimer(0); 
+                    hideInfo();
+
+                    
+                    setupAudio();
+
+                    
+                    while (group.children.length > 0) {
+                        group.remove(group.children[0]);
+                    }
+
+                    
+                    destructionParticles.forEach(particle => {
+                        scene.remove(particle);
+                    });
+                    destructionParticles = [];
+
+                    
+                    sparkParticles.forEach(particle => {
+                        scene.remove(particle);
+                    });
+                    sparkParticles = [];
+
+                    
+                    createObjects();
+
+                    
+                    if (timerSprite.material.map) {
+                        timerSprite.material.map.dispose();
+                    }
+                    timerSprite.material.map = createTextSprite(`Timer : ${Math.ceil(remainingTime)}`, { fontsize: 64, backgroundColor: { r: 255, g: 255, b: 255, a: 0.0 } }).material.map;
+
+                    if (scoreSprite.material.map) {
+                        scoreSprite.material.map.dispose();
+                    }
+                    scoreSprite.material.map = createTextSprite(`Score : ${score}`, { fontsize: 64, backgroundColor: { r: 255, g: 255, b: 255, a: 0.0 } }).material.map;
+
+                    
+                    session.addEventListener('end', () => {
+                        endGame();
+                    });
+                }).catch(err => {
+                    console.error('Échec du démarrage de la session XR :', err);
+                });
+            } else {
+                console.error('WebXR n\'est pas supporté par ce navigateur.');
+            }
+        }
+
+        
+        function showInfo(contentHTML) {
+            infoContent.innerHTML = contentHTML;
+            infoElement.style.display = 'flex';
+        }
+
+        
+        function hideInfo() {
+            infoElement.style.display = 'none';
+        }
+
+        
+        function startGame() {
+            hideInfo();
+            startARSession();
+        }
+
+        
+        function restartGame() {
+            showInfo(`
+                <h2>Bienvenue dans le Jeu de Web XR</h2>
+                <p>Votre objectif est de détruire toute la malbouffe. Utilisez votre laser pour cibler les objets et les éliminer avant la fin du temps imparti.</p>
+                <button id="startButton">Commencer la Partie</button>
+            `);
+
+            const newStartButton = document.getElementById('startButton');
+            newStartButton.addEventListener('click', startGame);
+
+            
+            remainingTime = GAME_DURATION;
+            score = 0;
+            updateScore();
+            
+        }
+
+        
+        init();
+        loadModels();
+    </script>
+</body>
+
+</html>
